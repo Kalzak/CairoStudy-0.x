@@ -1,8 +1,0 @@
-Why is memory immutable? What was the reason?
-
-What is the point of specifically defining a constant? Because memory is immutable anyways?
-  Is it just for readability to show that some particular variable will never change?
-  What I mean to ask if what's the low-level difference between...
-    `let (array_size) = 3`
-      and...
-    `const ARRAY_SIZE = 3`
