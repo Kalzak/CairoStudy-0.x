@@ -481,8 +481,8 @@ Sections
     ```
     let foo_ret : foo.Return = ap`
     ```
-    - Now you can access `z` as `foo\_ret.z`
-    - In the case above `foo\_ret` is implicitly a reference to `ap` with type `foo.Return`
+    - Now you can access `z` as `foo_ret.z`
+    - In the case above `foo_ret` is implicitly a reference to `ap` with type `foo.Return`
 
 ### return values unpacking
   - Cairo supports syntactic sugar to assign multiple return values to references via tuples
@@ -561,3 +561,246 @@ Sections
     # You can replace the above with
     local pt : Point = (x=2, y=3)
     ```
+
+## object allocation
+  - Cairo has a few ways of storing an object in memory and getting a pointer to it (which can be used in other functions)
+    - Memory segment allocation
+      - The `alloc()` function can be used to create an arbitrary length array
+    - Single item allocation
+      - The `new` operator initializes a single item and returns a pointer to it
+    - Local variables
+      - You can allocate a local variable and retrieve its address
+
+### alloc()
+  - The standard library function `alloc()` may be used to "dynamically" allocate a new memory segment
+  - This segment can be used to store an array or a single element
+  - Shown example
+    ```
+    from starkware.cairo.common.alloc import alloc
+
+    func foo():
+      let (struct_array : MyStruct*) = alloc()
+
+      # Set the first three elements
+      assert struct_array[0] = MyStruct(a=1, b=2)
+      assert struct_array[1] = MyStruct(a=3, b=4)
+      assert struct_array[2] = MyStruct(a=5, b=6)
+      return ()
+    end
+    ```
+
+### the "new" operator
+  - The `new` operator takes an expression and pushes it onto the stack and returns a pointer to memory address of that object
+  - Shown example
+    ```
+    func foo():
+      tempvar ptr : MyStruct* = new MyStruct(a=1, b=2)
+      assert ptr.a = 1
+      assert ptr.b = 2
+      return ()
+    end
+    ```
+  - Unlike `alloc()` (which allocates a new memory segment) the `new` operator creates the object in the execution segment
+  - Since memory on Cairo is never freed both applications have a similar outcome: You can use the pointer even after the function ends
+  - Since the object is created in the execution segment it can't be used for arbitrary sized arrays
+  - The `new` operator is useful because you can allocate the memory and initialize the object in one instruction
+  - Can use multiple `new` operators in the same line
+  - You can use `new` to allocate a fixed-size array using tuples
+    ```
+    func foo():
+      tempvar arr : felt* = new (1, 1, 2, 3 ,5)
+      assert arr[4] = 5
+      return ()
+    end
+    ```
+  - For arrays of structs you need to explicitly cast the pointer 
+    ```
+    func foo(): 
+      tempvar arr : MyStruct* = cast(new (MyStruct(a=1, b=2), MyStruct(a=3, b=4)), MyStruct*)
+      assert arr[1].a = 3
+      return ()
+    end
+    ```
+
+## scope attributes
+  - You can define an attribute as a code block by surrounding it with a `with_attr` statement as follows
+    ```
+    with_attr attribute_name("Attribute value"):
+      # Code block
+    end
+    ```
+  - The attribute value must be a string and can refer to local variables only
+    - Referring to a variables is done like this: `"x must be positive. Got: {x}."`
+  - Currently only one attribute is supported by the Cairo runner: `error_message`
+    - It allows user to annotate a code block with an error message
+    - The error message (attribute value) will be added to the trace in the case of an error inside the attribute
+
+## imports
+  - For readability and modularity you can import instead of having everything in one source file
+  - Cairo allows importing from another file with the following syntax
+    ```
+    from a.b import c as d
+    ```
+    - Will search for a Cairo module `a.b` and import `c` from it, binding `c` to the name `d` in this module
+    - The `as` clause is optional, if not used then you simply refer to `c` as `c`
+
+### import search paths
+  - When Cairo looks for the module `a.b` in the example above it will
+    - Search for file `a/b.cairo` in the paths it has been configured to search
+      - The paths searched are taken from a colon-separated list that can be set in two ways
+        - The `--cairo_path` argument to the compiler
+        - The environment variable `CAIRO_PATH`
+      - If you wanted to add `/home/cairo_libs` and `/tmp/cairo_libs` then you will do either of the following
+        - `cairo-compile --cairo_path="/home/cairo_libs:/tmp/cairo_libs" ...`
+        - `CAIRO_PATH="/home/cairo_libs:/tmp/cairo_libs"` followed by `cairo-compile`
+  - Compiler will also search the current directory and the standard library directory relative to the compiler path
+  - Compiler will automatically detect and fail on
+    - Cyclic imports
+    - Multiple imports sharing same name in a single Cairo file
+
+## hints
+### introduction
+  - Cairo supports nondeterministic instructions
+    - EG: To compute the root of 25 one may write
+      ```
+      [ap] = 25; ap++
+      [ap - 1] = [ap] * [ap]; ap++
+      ```
+    - This expression is fine for the verifier but the prover cannot handle (value could be `-5` or `5`)
+      - So we have to tell the prover what to do in order to compute the root
+    - This is done by adding "hints"
+  - A hint is a block of Python code that will be executed by the prover right before the next instruction
+  - The format is as follows
+    ```
+    [ap] = 25; ap++
+    %{
+      import math
+      memory[ap] = int(math.sqrt(memory[ap - 1]))
+    }%
+    [ap - 1] = [ap] * [ap]; ap++
+    ``` 
+    - To access [ap] in the hint we use the syntax `memory[ap]`
+    - To access a Cairo constant `x` in a hint you use the expression `ids.x`
+      - Function arguments and references can be accessed in the same way
+  - Note that a hint is attached to the next instruction and is executed _before each execution_ of the corresponding instruction
+    - EG:
+      ```
+      %{ print("Hello world!") }%
+      jmp rel 0
+      ``` 
+      - This would print `Hello world!` infinitely (rather than just printing once and then starting the infinite loop)
+
+## program input and output
+  - A Cairo program may have a secret input (called "program input") and a public output (called "program output")
+  - Use case
+    - You want to prove you know the pre-image of a hash function (that is, `x` such that `hash(x) = y` for a given `y`)
+    - Input is your secret `x`
+    - Program computes the hash of your input
+    - Program outputs result, and since Cairo output is public everyone who gets the proof will be convinced that you know the pre-image
+  - Note that sometimes part of the program input needs to be in output to be a good proof
+    - EG: Proving "I know the n-th Fibonacci number is Y"
+    - Program input in this case in `n` and output will be `n` and `Y` because the verifier has to see what `n` is
+    - Without it, people will just see a proof "I know that some Fibonacci number if `Y`"
+
+### program input
+  - To add program to a Cairo program you create a `json` file with your program input
+    ```
+    {
+      "secret": 1234
+    }
+    ```
+  - In your Cairo code you can refer to the secret with a hint
+    ```
+    func main():
+      %{ memory[ap] = program_input['secret'] %}
+      [ap] = [ap]; ap++
+      ret
+    end
+    ```
+  - Then pass it to `cairo-run` using the `--program_input` flag
+  - Then you can use hints to access the content of this file using the variable `program_input`
+    - Recall that hints are only visible to the prover
+
+### program output
+  - Start by adding the following directive to the top of your file: `%builtins output`
+  - You need to run your program with a different layout to use the `output` builtin
+    - Add `--layout=small` to `cairo-run`
+    - Using the `small` layout requires the number of steps to be divisible by 512
+    - That means you have to specify the number of steps, for small programs 512 will suffice
+  - The `%builtins output` directive makes the `main()` function get one argument and return one value
+    - The argument is conventionally called `output_ptr`
+      - Program should use it as a pointer to a block of memory to which it may write its outputs
+    - `main()` should return the value of the pointer after writing, signifying where the chunk of output memory ends
+  - The following program writes three contant values to output
+    ```
+    %builtins output
+
+    func main(output_ptr) -> (output_ptr):
+      [ap] = 100
+      [ap] = [output_ptr]; ap++
+
+      [ap] = 200
+      [ap] = [output_ptr + 1]; ap++
+
+      [ap] = 300
+      [ap] = [output_ptr + 2]; ap++
+
+      # Return the new value of output_ptr, which was advanced by 3
+      [ap] = output_ptr + 3; ap++
+      ret
+    end
+    ```
+  - Remember that `output_ptr` is the address while `[output_ptr]` is the value it points to
+
+## segments
+### rationale
+  - The memory of a Cairo program has to be continuous
+    - However some parts of the program may be invididually continuous but vary in length in ways that are only computed at runtime
+      - Their size can only be known after the program terminates
+  - For this purpose during the run of the Cairo VM it's useful to treat the memory as a list of continous segments
+    - These segments are concatenated to form one continuous chunk at the end of the run, only once their final sizes are calculated
+
+### relocatable values
+  - The absolute address of every memory cell within a segment can only be determined at the end of a VM run
+  - Because these addresses can be stored in memory cells themselves, the VM needs a way to refer to them
+  - This is achieved with _relocatable values_, represented as `<segment>:<offset>` where
+    - `<segment>` is the segment number, assigned arbitrarily at the start of the run
+    - `<offset>` is the offset of the memory cell within the segment
+  - Note that because segment numbers are assigned arbitrarily, the number is not guaranteed to represent the same segment
+    - This even applies for multiple runs in the same program, you will still find different segment numbers
+
+### segment use - program and execution segments
+  - Cairo programs themselves are kept in memory, in what is called the "program segment"
+    - This segment is of a fixed length and contains the numeric representation of the Cairo program
+    - The program counter `pc` starts at the beginning of the program segment
+  - In addition to this, any Cairo program requires an "execution segment"
+    - This is where
+      - The registers `ap` and `fp` start
+      - Where data generated during the run of a Cairo program (variables, return addresses for function calls, etc) is stored
+  - The length of the execution segment is variables as it can depend on factors such as the program input
+
+### segment use - builtin segments
+  - Every builtin receives its own continuous area in memory
+  - This memory is located in its own segment which is variable in length
+
+## nondeterministic jumps
+  - There is a code pattern called "nondeterministic jumps" that combines conditional jumps and hints
+  - A nondeterministic jump is a jump instruction that may or may not be executed
+    - The decision to execute the jump will be done according to the __provers__ decision
+      - Decision is the provers rather than according to a condition on values which were computed before
+  - To do this use the Cairo instruction
+    ```
+    jmp label if [ap] != 0; ap++
+    ```
+  - The idea is to use an unused memory cell (`[ap]`) to decide whether or not to jump
+    - Don't forget to increment `ap` to make sure the following instructions don't use this memory cell
+  - As with every nondeterministic instruction a hint must be attached to let the prover know whether to jump or not
+    - EG:
+      ```
+      %{
+        memory[ap] = 1 if x > 10 else 0
+      %}
+      jmp label if [ap] != 0; ap++
+      ```
+  - The prover cannot be trusted, so you should have an assert to make sure that the result of hints done by the prover is what you want
+  - Then the verifier can check your assert statement and ensure that the prover has done the right thing
